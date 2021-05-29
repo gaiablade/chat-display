@@ -1,8 +1,7 @@
 *.sh
 tokens.json
 tokens_back.json
-*.js
 package.json
 package-lock.json
 node_modules
-button.html
+source_back.js
