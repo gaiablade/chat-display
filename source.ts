@@ -1,40 +1,19 @@
-const colors = require('colors');
-import * as http from 'http';
-import * as https from 'https';
-const nf = require('node-fetch');
-const fs = require('fs');
-const tmi = require('tmi.js');
+import colors = require('colors');
+import fs = require('fs');
+import http = require('http');
+import crypto = require('crypto');
+import tmi = require('tmi.js');
+
+const fetch = require('node-fetch');
 const readline = require('readline').createInterface({
     input: process.stdin,
     output: process.stdout
 });
-const crypto = require('crypto');
+import tok = require('./tokens');
 
 interface RetStatus {
     status: boolean,
     message: string
-}
-
-interface Tokens {
-    'client-id': string,
-    'client-secret': string,
-    'oauth-token': string,
-    'refresh-token': string
-}
-
-/**
- * Read tokens from confidential JSON file.
- * @param filename JSON file containing the token information
- * @returns Tokens
- */
-function read_tokens(filename: string): Tokens {
-    const tokens = JSON.parse(fs.readFileSync('tokens.json', {encoding: 'utf-8'}));
-    return {
-        'client-id': tokens['client-id'],
-        'client-secret': tokens['client-secret'],
-        'oauth-token': tokens['oauth-token'],
-        'refresh-token': tokens['refresh-token']
-    };
 }
 
 const code_pattern = /\?code=(.+)&scope=.+/
@@ -46,7 +25,7 @@ const columns = process.stdout.columns;
  * @param tokens Tokens object containing client information and refresh token.
  * @returns {Promise<RetStatus>}
  */
-function refresh(tokens: Tokens): Promise<RetStatus> {
+function refresh(tokens: tok.Tokens): Promise<RetStatus> {
     interface RefreshJSON {
         message: string;
         status: number,
@@ -57,11 +36,11 @@ function refresh(tokens: Tokens): Promise<RetStatus> {
     return new Promise((resolve, reject) => {
         const refresh_url = `https://id.twitch.tv/oauth2/token` +
                             `?grant_type=refresh_token` +
-                            `&client_id=${tokens['client-id']}` +
-                            `&client_secret=${tokens['client-secret']}`
+                            `&client_id=${tokens.client_id}` +
+                            `&client_secret=${tokens.client_secret}`
 
         // Post refresh request to API
-        nf(refresh_url, {
+        fetch(refresh_url, {
             method: 'POST'
         }).then((res: Response) => res.json()).then((json: RefreshJSON) => {
             if ('error' in json) {
@@ -76,9 +55,9 @@ function refresh(tokens: Tokens): Promise<RetStatus> {
                     message: `* Error: ${json['message']}`
                 });
             } else {
-                tokens['oauth-token'] = json['access_token'];
-                tokens['refresh-token'] = json['refresh_token'];
-                fs.writeFile('tokens.json', JSON.stringify(tokens, null, 2), {encoding:'utf-8'}, (err: Error) => {
+                tokens.oauth_token = json['access_token'];
+                tokens.refresh_token = json['refresh_token'];
+                fs.writeFile('tokens.json', JSON.stringify(tokens, null, 2), {encoding:'utf-8'}, (err: Error | null) => {
                     if (err) console.log(err);
                     else {
                         resolve({
@@ -102,7 +81,7 @@ function refresh(tokens: Tokens): Promise<RetStatus> {
  * @param tokens Tokens object containing client information.
  * @returns {Promise<RetStatus>}
  */
-function authorize(tokens: Tokens): Promise<RetStatus> {
+function authorize(tokens: tok.Tokens): Promise<RetStatus> {
     interface AuthorizeJSON {
         'access_token': string,
         'refresh_token': string
@@ -112,7 +91,7 @@ function authorize(tokens: Tokens): Promise<RetStatus> {
         console.log('OAuth token is invalid, must get a new one.');
         // Send user to authorization URL
         const url = `https://id.twitch.tv/oauth2/authorize` +
-                    `?client_id=${tokens['client-id']}` +
+                    `?client_id=${tokens.client_id}` +
                     `&redirect_uri=http://localhost` +
                     `&response_type=code` +
                     `&scope=chat:read+chat:edit` +
@@ -128,18 +107,18 @@ function authorize(tokens: Tokens): Promise<RetStatus> {
                 if (m) {
                     // code recieved, now request oauth token
                     const token_url = `https://id.twitch.tv/oauth2/token` +
-                                    `?client_id=${tokens['client-id']}` +
-                                    `&client_secret=${tokens['client-secret']}` +
+                                    `?client_id=${tokens.client_id}` +
+                                    `&client_secret=${tokens.client_secret}` +
                                     `&code=${m[1]}` +
                                     `&grant_type=authorization_code` +
                                     `&redirect_uri=http://localhost`;
-                    nf(
+                    fetch(
                         token_url, {method: 'POST'}
                     ).then((res: any) => res.json()).then((json: AuthorizeJSON) => {
                         const oauth_token = json['access_token'];
                         const refresh_token = json['refresh_token']
-                        tokens['oauth-token'] = oauth_token;
-                        tokens['refresh-token'] = refresh_token;
+                        tokens.oauth_token = oauth_token;
+                        tokens.refresh_token = refresh_token;
                         fs.writeFileSync('tokens.json', JSON.stringify(tokens, null, 2), {encoding:'utf-8'});
 
                         res.writeHead(200, {
@@ -178,7 +157,7 @@ function verifySignature(messageSignature:any, messageID:any, messageTimestamp:a
 
     return expectedSignatureHeader === messageSignature
 }
-async function event_sub(tokens: Tokens): Promise<void> {
+async function event_sub(tokens: tok.Tokens): Promise<void> {
     const ngrok_url = await (async () => {
         return new Promise((resolve, reject) => {
             readline.question('Please enter the ngrok url: ', (url:string) => {
@@ -189,20 +168,20 @@ async function event_sub(tokens: Tokens): Promise<void> {
     
     // first get app token:
     const token_url = `https://id.twitch.tv/oauth2/token` +
-                       `?client_id=${tokens['client-id']}` +
-                       `&client_secret=${tokens['client-secret']}`+
+                       `?client_id=${tokens.client_id}` +
+                       `&client_secret=${tokens.client_secret}`+
                        `&grant_type=client_credentials` +
                        `&scope=chat:read`
     
-    nf(token_url, {
+    fetch(token_url, {
         method: 'POST'
     }).then((res:any) => res.json()).then((json:any) => {
         const app_token = json['access_token'];
         const url = 'https://api.twitch.tv/helix/eventsub/subscriptions';
-        nf(url, {
+        fetch(url, {
             method: 'POST',
             headers: {
-                'Client-ID': tokens['client-id'],
+                'Client-ID': tokens.client_id,
                 'Authorization': `Bearer ${app_token}`,
                 'Content-Type': 'application/json'
             },
@@ -224,7 +203,7 @@ async function event_sub(tokens: Tokens): Promise<void> {
             } else {
                 console.log('try again in a minute');
             }
-            const server = http.createServer((req:any, res:http.ServerResponse) => {
+            const server = http.createServer((req:http.IncomingMessage, res:http.ServerResponse) => {
                 const headers = req['headers'];
                 let body = '';
                 req.on('data', (chunk:string) => {
@@ -260,13 +239,13 @@ async function event_sub(tokens: Tokens): Promise<void> {
 }
 
 async function main(): Promise<void> {
-    const tokens = read_tokens('tokens.json');
+    const tokens = new tok.Tokens('tokens.json');
     await event_sub(tokens);
     // Check if stored oauth token is valid:
-    nf('https://api.twitch.tv/helix/search/channels?query=gaia_blade', {
+    fetch('https://api.twitch.tv/helix/search/channels?query=gaia_blade', {
         headers: {
-            'client-id': `${tokens['client-id']}`,
-            'Authorization': `Bearer ${tokens['oauth-token']}`
+            'client-id': `${tokens.client_id}`,
+            'Authorization': `Bearer ${tokens.oauth_token}`
         }
     }).then((res:any) => res.json()).then(async (json: any) => {
         if ('error' in json) {
@@ -276,22 +255,24 @@ async function main(): Promise<void> {
                     console.log(refreshed.message);
                     const authorized: any = await authorize(tokens);
                     console.log(authorized.message);
-                    bot(tokens['oauth-token']);
+                    bot(tokens.oauth_token);
                 } else {
-                    bot(tokens['oauth-token']);
+                    bot(tokens.oauth_token);
                 }
             } catch (err) {
                 console.log(err);
             }
         } else {
-            bot(tokens['oauth-token']);
+            bot(tokens.oauth_token);
         }
     }).catch((err: Error) => {
         console.log(err);
     });
 }
 
-const bot = (oauth_token: string): void => {
+const bot = (oauth_token: string | null): void => {
+    if (oauth_token === null) return;
+
     console.clear();
 
     const opts = {
