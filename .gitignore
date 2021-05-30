@@ -6,3 +6,6 @@ package-lock.json
 node_modules
 source_back.js
 source.js
+ngrok
+delete_sub.js
+webhook.json

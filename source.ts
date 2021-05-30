@@ -1,8 +1,14 @@
 const colors = require('colors');
 import * as http from 'http';
+import * as https from 'https';
 const nf = require('node-fetch');
 const fs = require('fs');
 const tmi = require('tmi.js');
+const readline = require('readline').createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
+const crypto = require('crypto');
 
 interface RetStatus {
     status: boolean,
@@ -164,13 +170,30 @@ function authorize(tokens: Tokens): Promise<RetStatus> {
 }
 
 // WORK IN PROGRESS
-function event_sub(tokens: Tokens): void {
+const verification_password = 'nimbus_is_well_behaved';
+function verifySignature(messageSignature:any, messageID:any, messageTimestamp:any, body:any) {
+    let message = messageID + messageTimestamp + body
+    let signature = crypto.createHmac('sha256', verification_password).update(message) // Remember to use the same secret set at creation
+    let expectedSignatureHeader = "sha256=" + signature.digest("hex")
+
+    return expectedSignatureHeader === messageSignature
+}
+async function event_sub(tokens: Tokens): Promise<void> {
+    const ngrok_url = await (async () => {
+        return new Promise((resolve, reject) => {
+            readline.question('Please enter the ngrok url: ', (url:string) => {
+                resolve(url);
+            })
+        });
+    })();
+    
     // first get app token:
     const token_url = `https://id.twitch.tv/oauth2/token` +
                        `?client_id=${tokens['client-id']}` +
                        `&client_secret=${tokens['client-secret']}`+
                        `&grant_type=client_credentials` +
                        `&scope=chat:read`
+    
     nf(token_url, {
         method: 'POST'
     }).then((res:any) => res.json()).then((json:any) => {
@@ -191,15 +214,43 @@ function event_sub(tokens: Tokens): void {
                 },
                 'transport': {
                     'method': 'webhook',
-                    'callback': 'https://bf738ae08135.ngrok.io',
-                    'secret': 'nimbus_is_well_behaved'
+                    'callback': `${ngrok_url}/notifications`,
+                    'secret': verification_password
                 }
             })
         }).then((res:any) => res.json()).then((json:any) => {
-            // TODO: CONTINUE HERE
-            http.createServer((req:any, res:any) => {
-                console.log(req);
-            }).listen(443);
+            if ('data' in json) {
+                fs.writeFileSync('webhook.json', JSON.stringify({'app-token': app_token, id: json['data'][0]['id']}, null, 2));
+            } else {
+                console.log('try again in a minute');
+            }
+            const server = http.createServer((req:any, res:http.ServerResponse) => {
+                const headers = req['headers'];
+                let body = '';
+                req.on('data', (chunk:string) => {
+                    body += chunk;
+                });
+                req.on('end', () => {
+                    const json = JSON.parse(body);
+
+                    if (!verifySignature(headers['twitch-eventsub-message-signature'], headers['twitch-eventsub-message-id'],
+                        headers['twitch-eventsub-message-timestamp'], body)) {
+                        res.statusCode = 403;
+                        res.write('Forbidden');
+                        res.end();
+                    } else {
+                        if (headers['twitch-eventsub-message-type'] === 'webhook_callback_verification') {
+                            res.statusCode = 200;
+                            res.write(json['challenge']);
+                            res.end();
+                        } else if (headers['twitch-eventsub-message-type'] === 'notification') {
+                            console.log(`New Follower: ${colors.red(json['event']['user_name'])}`);
+                            res.write('');
+                            res.end();
+                        }
+                    }
+                });
+            }).listen(3000);
         }).catch((err:Error) => {
             console.error(err);
         });
@@ -208,8 +259,9 @@ function event_sub(tokens: Tokens): void {
     });
 }
 
-function main(): void {
+async function main(): Promise<void> {
     const tokens = read_tokens('tokens.json');
+    await event_sub(tokens);
     // Check if stored oauth token is valid:
     nf('https://api.twitch.tv/helix/search/channels?query=gaia_blade', {
         headers: {
@@ -304,6 +356,5 @@ const bot = (oauth_token: string): void => {
 
     client.connect();
 };
-//event_sub();
 
 main();
