@@ -70,5 +70,8 @@
     /* Advanced Options */
     "skipLibCheck": true,                           /* Skip type checking of declaration files. */
     "forceConsistentCasingInFileNames": true        /* Disallow inconsistently-cased references to the same file. */
-  }
+  },
+  "files": [
+    "source.ts", "tokens.ts", "delete_subscriptions.ts", "event_sub.ts"
+  ]
 }

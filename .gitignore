@@ -1,12 +1,15 @@
 *.sh
 tokens.json
 tokens_back.json
-package.json
 package-lock.json
 node_modules
 source_back.js
+source_back2.ts
 source.js
 ngrok
 delete_sub.js
 webhook.json
 tokens.js
+id.js
+delete_subscriptions.js
+event_sub.js

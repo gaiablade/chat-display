@@ -1,281 +1,125 @@
-import colors = require('colors');
 import fs = require('fs');
-import http = require('http');
-import crypto = require('crypto');
-import tmi = require('tmi.js');
-
-const fetch = require('node-fetch');
-const readline = require('readline').createInterface({
-    input: process.stdin,
-    output: process.stdout
-});
+import node_fetch = require('node-fetch');
 import tok = require('./tokens');
+import http = require('http');
+import colors = require('colors');
+import tmi = require('tmi.js')
+import es = require('./event_sub');
 
-interface RetStatus {
-    status: boolean,
-    message: string
+const fetch = node_fetch.default;
+
+async function validateToken(token: string): Promise<boolean> {
+    const validate_url = 'https://id.twitch.tv/oauth2/validate';
+    const response = await fetch(validate_url, {
+        headers: {
+            Authorization: `OAuth ${token}`
+        }
+    }).then((res: any) => res.json());
+
+    console.log(response);
+
+    if ('status' in response) {
+        // Unsuccessful:
+        return false;
+    } else if ('client_id' in response) {
+        // Successful:
+        return true;
+    } else {
+        // Unsuccessful:
+        return false;
+    }
 }
 
-const code_pattern = /\?code=(.+)&scope=.+/
+async function refreshToken(tokens: tok.Tokens): Promise<boolean> {
+    const refresh_url = 'https://id.twitch.tv/oauth2/token' +
+                        '?grant_type=refresh_token' +
+                        `&refresh_token=${tokens.refresh_token}` +
+                        `&client_id=${tokens.client_id}` +
+                        `&client_secret=${tokens.client_secret}`
+    
+    const response = await fetch(refresh_url, {
+        method: 'POST'
+    }).then((res: node_fetch.Response) => res.json());
 
-const columns = process.stdout.columns;
-
-/**
- * Use refresh token to get new valid OAuth token.
- * @param tokens Tokens object containing client information and refresh token.
- * @returns {Promise<RetStatus>}
- */
-function refresh(tokens: tok.Tokens): Promise<RetStatus> {
-    interface RefreshJSON {
-        message: string;
-        status: number,
-        'access_token': string,
-        'refresh_token': string
+    if ('error' in response) {
+        return false;
+    } else if ('access_token' in response) {
+        tokens.oauth_token = response.access_token;
+        tokens.refresh_token = response.refresh_token;
+        await tokens.export();
+        return true;
+    } else {
+        return false;
     }
-
-    return new Promise((resolve, reject) => {
-        const refresh_url = `https://id.twitch.tv/oauth2/token` +
-                            `?grant_type=refresh_token` +
-                            `&client_id=${tokens.client_id}` +
-                            `&client_secret=${tokens.client_secret}`
-
-        // Post refresh request to API
-        fetch(refresh_url, {
-            method: 'POST'
-        }).then((res: Response) => res.json()).then((json: RefreshJSON) => {
-            if ('error' in json) {
-                console.error(`* Error: ${json['message']}`);
-                resolve({
-                    status: false,
-                    message: `* Error: ${json['message']}`
-                });
-            } else if (json['status'] === 400) {
-                resolve({
-                    status: false,
-                    message: `* Error: ${json['message']}`
-                });
-            } else {
-                tokens.oauth_token = json['access_token'];
-                tokens.refresh_token = json['refresh_token'];
-                fs.writeFile('tokens.json', JSON.stringify(tokens, null, 2), {encoding:'utf-8'}, (err: Error | null) => {
-                    if (err) console.log(err);
-                    else {
-                        resolve({
-                            status: true,
-                            message: 'OAuth Token refreshed!'
-                        });
-                    }
-                });
-            }
-        }).catch((err: Error) => {
-            reject({
-                status: false,
-                message: `* Error: ${err}`
-            });
-        })
-    });
 }
 
-/**
- * Prompt user to log-in to Twitch to authenticate the app. Gets valid OAuth token. 
- * @param tokens Tokens object containing client information.
- * @returns {Promise<RetStatus>}
- */
-function authorize(tokens: tok.Tokens): Promise<RetStatus> {
-    interface AuthorizeJSON {
-        'access_token': string,
-        'refresh_token': string
+async function parseUrlParam(url: string, param_name: string): Promise<string | null> {
+    //const pattern = `[?&]${param_name}=(.*)[&$]`;
+    const match = new RegExp(`[?&]${param_name}=(.*)[&$]`).exec(url);
+    if (match) {
+        return match[1];
+    } else {
+        return null;
     }
+}
 
-    return new Promise((resolve, reject) => {
-        console.log('OAuth token is invalid, must get a new one.');
-        // Send user to authorization URL
-        const url = `https://id.twitch.tv/oauth2/authorize` +
-                    `?client_id=${tokens.client_id}` +
-                    `&redirect_uri=http://localhost` +
-                    `&response_type=code` +
-                    `&scope=chat:read+chat:edit` +
-                    `&force_verify=true`
-        console.log(`Navigate to this URL and authorize the app: ${url}`)
+async function authenticate(tokens: tok.Tokens): Promise<boolean> {
+    const authenticate_url = 'https://id.twitch.tv/oauth2/authorize' +
+                             `?client_id=${tokens.client_id}` +
+                             '&redirect_uri=http://localhost' +
+                             '&response_type=code' +
+                             '&scope=chat:read+chat:edit' +
+                             '&force_verify=true'
+    
+    console.log(`Please login to authenticate the app: ${authenticate_url}`);
 
-        http.createServer(function (this:any, req:http.IncomingMessage, res:http.ServerResponse) {
-            this.close();
-            if (!req.url) {
-                reject();
-            } else {
-                const m = code_pattern.exec(req.url);
-                if (m) {
-                    // code recieved, now request oauth token
-                    const token_url = `https://id.twitch.tv/oauth2/token` +
-                                    `?client_id=${tokens.client_id}` +
-                                    `&client_secret=${tokens.client_secret}` +
-                                    `&code=${m[1]}` +
-                                    `&grant_type=authorization_code` +
-                                    `&redirect_uri=http://localhost`;
-                    fetch(
-                        token_url, {method: 'POST'}
-                    ).then((res: any) => res.json()).then((json: AuthorizeJSON) => {
-                        const oauth_token = json['access_token'];
-                        const refresh_token = json['refresh_token']
-                        tokens.oauth_token = oauth_token;
-                        tokens.refresh_token = refresh_token;
-                        fs.writeFileSync('tokens.json', JSON.stringify(tokens, null, 2), {encoding:'utf-8'});
-
-                        res.writeHead(200, {
-                            'Content-Type': 'text/html'
-                        })
-                        res.write(fs.readFileSync('response.html', {encoding:'utf-8'}));
-                        res.end();
-
-                        resolve({
-                            status: true,
-                            message: 'Successfully authorized application, OAuth token recieved.'
-                        });
-                    }).catch((err: Error) => {
-                        reject({
-                            status: false,
-                            message: `* Error: ${err}`
-                        });
-                    });
-                } else {
-                    reject({
-                        status: false,
-                        message: `* Error: req.url = ${req.url}`
-                    });
+    const access_token = await (() => {
+        return new Promise<string | null>((resolve, reject) => {
+            const server = http.createServer(async function (this: any, req: http.IncomingMessage, res: http.ServerResponse) {
+                if ('url' in req && typeof req.url === 'string') {
+                    const code: string | null = await parseUrlParam(req.url, 'code');
+                    res.writeHead(200, 'Success', {
+                        'Content-Type': 'text/html'
+                    })
+                    res.write(fs.readFileSync('response.html', {encoding: 'utf8'}));
+                    res.end();
+                    this.close();
+                    resolve(code);
                 }
-            }
-        }).listen(80);
-    });
-}
-
-// WORK IN PROGRESS
-const verification_password = 'nimbus_is_well_behaved';
-function verifySignature(messageSignature:any, messageID:any, messageTimestamp:any, body:any) {
-    let message = messageID + messageTimestamp + body
-    let signature = crypto.createHmac('sha256', verification_password).update(message) // Remember to use the same secret set at creation
-    let expectedSignatureHeader = "sha256=" + signature.digest("hex")
-
-    return expectedSignatureHeader === messageSignature
-}
-async function event_sub(tokens: tok.Tokens): Promise<void> {
-    const ngrok_url = await (async () => {
-        return new Promise((resolve, reject) => {
-            readline.question('Please enter the ngrok url: ', (url:string) => {
-                resolve(url);
-            })
+            }).listen(80);
         });
     })();
     
-    // first get app token:
-    const token_url = `https://id.twitch.tv/oauth2/token` +
-                       `?client_id=${tokens.client_id}` +
-                       `&client_secret=${tokens.client_secret}`+
-                       `&grant_type=client_credentials` +
-                       `&scope=chat:read`
-    
-    fetch(token_url, {
-        method: 'POST'
-    }).then((res:any) => res.json()).then((json:any) => {
-        const app_token = json['access_token'];
-        const url = 'https://api.twitch.tv/helix/eventsub/subscriptions';
-        fetch(url, {
-            method: 'POST',
-            headers: {
-                'Client-ID': tokens.client_id,
-                'Authorization': `Bearer ${app_token}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                'type': 'channel.follow',
-                'version': '1',
-                'condition': {
-                    'broadcaster_user_id': '165125839'
-                },
-                'transport': {
-                    'method': 'webhook',
-                    'callback': `${ngrok_url}/notifications`,
-                    'secret': verification_password
-                }
-            })
-        }).then((res:any) => res.json()).then((json:any) => {
-            if ('data' in json) {
-                fs.writeFileSync('webhook.json', JSON.stringify({'app-token': app_token, id: json['data'][0]['id']}, null, 2));
-            } else {
-                console.log('try again in a minute');
-            }
-            const server = http.createServer((req:http.IncomingMessage, res:http.ServerResponse) => {
-                const headers = req['headers'];
-                let body = '';
-                req.on('data', (chunk:string) => {
-                    body += chunk;
-                });
-                req.on('end', () => {
-                    const json = JSON.parse(body);
+    if (access_token === null) {
+        return false;
+    } else {
+        const token_url = 'https://id.twitch.tv/oauth2/token' +
+                          `?client_id=${tokens.client_id}` +
+                          `&client_secret=${tokens.client_secret}` +
+                          `&code=${access_token}` +
+                          '&grant_type=authorization_code' +
+                          '&redirect_uri=http://localhost'
+        const response = await fetch(token_url, {
+            method: 'POST'
+        }).then((res: node_fetch.Response) => res.json()).catch((err: any) => console.error(err));
 
-                    if (!verifySignature(headers['twitch-eventsub-message-signature'], headers['twitch-eventsub-message-id'],
-                        headers['twitch-eventsub-message-timestamp'], body)) {
-                        res.statusCode = 403;
-                        res.write('Forbidden');
-                        res.end();
-                    } else {
-                        if (headers['twitch-eventsub-message-type'] === 'webhook_callback_verification') {
-                            res.statusCode = 200;
-                            res.write(json['challenge']);
-                            res.end();
-                        } else if (headers['twitch-eventsub-message-type'] === 'notification') {
-                            console.log(`New Follower: ${colors.red(json['event']['user_name'])}`);
-                            res.write('');
-                            res.end();
-                        }
-                    }
-                });
-            }).listen(3000);
-        }).catch((err:Error) => {
-            console.error(err);
-        });
-    }).catch((err:Error) => {
-        console.log(err);
-    });
-}
-
-async function main(): Promise<void> {
-    const tokens = new tok.Tokens('tokens.json');
-    await event_sub(tokens);
-    // Check if stored oauth token is valid:
-    fetch('https://api.twitch.tv/helix/search/channels?query=gaia_blade', {
-        headers: {
-            'client-id': `${tokens.client_id}`,
-            'Authorization': `Bearer ${tokens.oauth_token}`
-        }
-    }).then((res:any) => res.json()).then(async (json: any) => {
-        if ('error' in json) {
-            try {
-                const refreshed: any = await refresh(tokens);
-                if (!refreshed.status) {
-                    console.log(refreshed.message);
-                    const authorized: any = await authorize(tokens);
-                    console.log(authorized.message);
-                    bot(tokens.oauth_token);
-                } else {
-                    bot(tokens.oauth_token);
-                }
-            } catch (err) {
-                console.log(err);
-            }
+        if (response) {
+            tokens.oauth_token = response.access_token;
+            tokens.refresh_token = response.refresh_token;
+            await tokens.export();
+            return true;
         } else {
-            bot(tokens.oauth_token);
+            return false;
         }
-    }).catch((err: Error) => {
-        console.log(err);
-    });
+    }
 }
 
-const bot = (oauth_token: string | null): void => {
-    if (oauth_token === null) return;
+function bot (oauth_token: string | undefined): void  {
+    if (oauth_token === undefined) return;
+    const columns: number = process.stdout.columns;
 
-    console.clear();
 
-    const opts = {
+    const opts: Object = {
         identity: {
             username: 'sanctum_bot', // Enter the chatbot's username
             password: oauth_token
@@ -294,12 +138,12 @@ const bot = (oauth_token: string | null): void => {
     const streamer_username = 'gaia_blade';
     const bot_username = 'sanctum_bot';
 
-    const client = new tmi.client(opts);
+    const client: tmi.Client = new tmi.client(opts);
 
-    client.on('message', (target:any, context:any, msg:any, self:any) => {
+    client.on('message', (target: string, context: tmi.ChatUserstate, msg: string, self: boolean) => {
         // Format for multi-line messages
-        const num_spaces = context.username.length + 2;
-        const spaces = ' '.repeat(num_spaces);
+        const num_spaces: number = context.username ? context.username.length + 2 : 0;
+        const spaces: string = ' '.repeat(num_spaces);
 
         msg = msg.trim();
 
@@ -315,7 +159,7 @@ const bot = (oauth_token: string | null): void => {
             if (username === bot_username) return msg_colors['bot'];
             return msg_colors['chat'];
         })(context.username);
-        console.log(`${user_type(context.username)}: ${colors.white(console_msg)}`);
+        console.log(`${user_type(context.username || '')}: ${colors.white(console_msg)}`);
 
         // Program in commands:
         if (!self) {
@@ -332,10 +176,41 @@ const bot = (oauth_token: string | null): void => {
     });
 
     client.on('connected', (addr:any, port:any) => {
-        console.log(colors.yellow(`* Connected to ${addr}:${port}`));
+        console.clear();
+        console.log(colors.gray(`* Connected to ${addr}:${port}`));
     });
 
     client.connect();
 };
+
+async function main(): Promise<void> {
+    // Open tokens.json file:
+    const tokens: tok.Tokens = new tok.Tokens('tokens.json');
+    await tokens.load();
+
+    // Check if OAuth token is valid:
+    let is_valid: boolean = false;
+    if (tokens.oauth_token !== undefined) {
+        is_valid = await validateToken(tokens.oauth_token);
+    }
+
+    // If not valid, try refreshing or authenticating:
+    if (!is_valid) {
+        let is_refreshed: boolean = false;
+        if (tokens.refresh_token !== undefined) {
+            // try refreshing
+            is_refreshed = await refreshToken(tokens);
+        }
+        let authenticated: boolean = true;
+        if (!is_refreshed) {
+            authenticated = await authenticate(tokens);
+        }
+    }
+
+    await es.eventSub(tokens);
+
+    console.log(tokens);
+    bot(tokens.oauth_token);
+}
 
 main();
