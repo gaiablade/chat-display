@@ -4,7 +4,7 @@ interface EventSub {
     oauth_token: string;
 }
 
-class Tokens {
+export class Tokens {
     client_id?: string;
     client_secret?: string;
     oauth_token?: string;
@@ -76,8 +76,4 @@ class Tokens {
             });
         });
     }
-}
-
-export {
-    Tokens
 }
